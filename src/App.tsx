@@ -1,0 +1,354 @@
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  DndContext,
+  PointerSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import { SortableContext, arrayMove, verticalListSortingStrategy } from "@dnd-kit/sortable";
+import { listen } from "@tauri-apps/api/event";
+import { api } from "./api";
+import type { AeroStatus, Settings as SettingsT, Task, WaitingKind } from "./types";
+import TaskRow from "./components/TaskRow";
+import Settings from "./components/Settings";
+
+const WIDTH = 340;
+const MAX_HEIGHT = 680;
+
+const DEFAULT_SETTINGS: SettingsT = {
+  corner: "top-right",
+  hotkey: "CmdOrCtrl+Control+T",
+  jump_mode: "workspace",
+  auto_collapse: false,
+};
+
+export default function App() {
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [settings, setSettings] = useState<SettingsT>(DEFAULT_SETTINGS);
+  const [aero, setAero] = useState<AeroStatus>({
+    installed: false,
+    server_enabled: false,
+    message: null,
+  });
+  const [collapsed, setCollapsed] = useState(false);
+  const [doneOpen, setDoneOpen] = useState(false);
+  const [view, setView] = useState<"list" | "settings">("list");
+  const [draft, setDraft] = useState("");
+  const [bindNext, setBindNext] = useState(false);
+
+  const measureRef = useRef<HTMLDivElement>(null);
+
+  // ---- initial load + tray "settings" event ----
+  useEffect(() => {
+    api.bootstrap().then((b) => {
+      setTasks(b.tasks);
+      setSettings({
+        corner: b.corner,
+        hotkey: b.hotkey,
+        jump_mode: b.jump_mode,
+        auto_collapse: b.auto_collapse,
+      });
+      setAero(b.aerospace);
+    });
+    const un = listen("open-settings", () => {
+      setCollapsed(false);
+      setView("settings");
+    });
+    return () => {
+      un.then((f) => f());
+    };
+  }, []);
+
+  // ---- auto-collapse on blur ----
+  useEffect(() => {
+    const onBlur = () => {
+      if (settings.auto_collapse) setCollapsed(true);
+    };
+    window.addEventListener("blur", onBlur);
+    return () => window.removeEventListener("blur", onBlur);
+  }, [settings.auto_collapse]);
+
+  // ---- resize the OS panel to hug content ----
+  useLayoutEffect(() => {
+    const el = measureRef.current;
+    if (!el) return;
+    const apply = () => {
+      const rect = el.getBoundingClientRect();
+      const w = collapsed ? Math.ceil(rect.width) : WIDTH;
+      const h = Math.min(Math.ceil(rect.height), MAX_HEIGHT);
+      api.setSize(w, Math.max(h, 36));
+    };
+    apply();
+    const ro = new ResizeObserver(apply);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [collapsed, view, tasks, doneOpen]);
+
+  // ---- local mutation helpers ----
+  const replace = (t: Task) => setTasks((prev) => prev.map((x) => (x.id === t.id ? t : x)));
+  const remove = (id: string) => setTasks((prev) => prev.filter((x) => x.id !== id));
+
+  const patchSettings = (patch: Partial<SettingsT>) =>
+    setSettings((s) => ({ ...s, ...patch }));
+
+  // ---- groups ----
+  const active = tasks.filter((t) => t.state === "active");
+  const waitingMe = tasks.filter((t) => t.state === "waiting" && t.waiting_kind !== "machine");
+  const waitingMachine = tasks.filter(
+    (t) => t.state === "waiting" && t.waiting_kind === "machine",
+  );
+  const done = tasks.filter((t) => t.state === "done");
+
+  // ---- actions ----
+  const addTask = useCallback(async () => {
+    const raw = draft.trim();
+    if (!raw) return;
+    const m = raw.match(/#(\S+)/);
+    const project = m ? m[1] : null;
+    const title = raw.replace(/#\S+/, "").trim() || raw;
+    let jumpType: "workspace" | null = null;
+    let jumpValue: string | null = null;
+    if (bindNext) {
+      try {
+        jumpValue = await api.aerospaceFocusedWorkspace();
+        jumpType = "workspace";
+      } catch {
+        /* aerospace unavailable — add without a binding */
+      }
+    }
+    const t = await api.createTask(title, project, jumpType, jumpValue);
+    setTasks((prev) => [t, ...prev]);
+    setDraft("");
+  }, [draft, bindNext]);
+
+  const cycle = (t: Task) => {
+    let state: Task["state"] = "active";
+    let kind: WaitingKind | null = null;
+    if (t.state === "active") {
+      state = "waiting";
+      kind = "me";
+    } else if (t.state === "waiting" && t.waiting_kind !== "machine") {
+      state = "waiting";
+      kind = "machine";
+    }
+    api.setState(t.id, state, kind).then(replace);
+  };
+
+  const complete = (t: Task) => api.setState(t.id, "done", null).then(replace);
+  const reopen = (t: Task) => api.setState(t.id, "active", null).then(replace);
+  const del = (t: Task) => api.deleteTask(t.id).then(() => remove(t.id));
+  const rename = (t: Task, title: string) =>
+    api.updateTitle(t.id, title, t.project).then(replace);
+  const jump = (t: Task) => {
+    if (t.jump_type && t.jump_value) api.jump(t.jump_type, t.jump_value).catch(() => {});
+  };
+  const bind = async (t: Task) => {
+    try {
+      const ws = await api.aerospaceFocusedWorkspace();
+      const updated = await api.setJump(t.id, "workspace", ws);
+      replace(updated);
+    } catch {
+      /* ignore when aerospace unavailable */
+    }
+  };
+
+  const refreshAero = () => api.aerospaceStatus().then(setAero);
+
+  // ---- drag reorder (within a group) ----
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+  );
+  const onDragEnd = (e: DragEndEvent) => {
+    const { active: a, over } = e;
+    if (!over || a.id === over.id) return;
+    const groups = [active, waitingMe, waitingMachine, done];
+    const group = groups.find((g) => g.some((t) => t.id === a.id));
+    if (!group || !group.some((t) => t.id === over.id)) return;
+    const oldIndex = group.findIndex((t) => t.id === a.id);
+    const newIndex = group.findIndex((t) => t.id === over.id);
+    const reordered = arrayMove(group, oldIndex, newIndex);
+    const ids = reordered.map((t) => t.id);
+    // optimistic: reflect new order locally
+    setTasks((prev) => {
+      const byId = new Map(reordered.map((t, i) => [t.id, i]));
+      return [...prev].sort((x, y) => {
+        const ix = byId.get(x.id);
+        const iy = byId.get(y.id);
+        if (ix !== undefined && iy !== undefined) return ix - iy;
+        return 0;
+      });
+    });
+    api.reorder(ids).catch(() => {});
+  };
+
+  const waitingCount = waitingMe.length;
+
+  return (
+    <div
+      ref={measureRef}
+      style={{ width: collapsed ? "fit-content" : WIDTH }}
+      className="overflow-hidden bg-black/20 text-white/90"
+    >
+      {/* header / collapsed pill */}
+      <div className={`flex items-center gap-2 px-3 ${collapsed ? "py-1.5 whitespace-nowrap" : "py-2"}`}>
+        <button
+          onClick={() => setCollapsed((c) => !c)}
+          className="shrink-0 text-white/45 hover:text-white"
+          title={collapsed ? "Expand" : "Collapse"}
+        >
+          {collapsed ? "▸" : "▾"}
+        </button>
+        <div className={`flex items-center gap-2 text-[12px] ${collapsed ? "" : "min-w-0 flex-1"}`}>
+          <Count color="bg-emerald-400" n={active.length} label="active" />
+          {waitingCount > 0 ? (
+            <span className="flex items-center gap-1 whitespace-nowrap text-amber-300">
+              <span className="h-1.5 w-1.5 rounded-full bg-amber-400 ts-pulse" />
+              {waitingCount} waiting on you
+            </span>
+          ) : (
+            <Count color="bg-sky-400" n={waitingMachine.length} label="running" />
+          )}
+        </div>
+        {!collapsed && view === "list" && (
+          <button
+            onClick={() => setView("settings")}
+            className="shrink-0 text-white/40 hover:text-white"
+            title="Settings"
+          >
+            ⚙
+          </button>
+        )}
+      </div>
+
+      {!collapsed && view === "settings" && (
+        <Settings
+          settings={settings}
+          aero={aero}
+          onPatch={patchSettings}
+          onAeroRefresh={refreshAero}
+          onClose={() => setView("list")}
+        />
+      )}
+
+      {!collapsed && view === "list" && (
+        <div className="scroll-area max-h-[600px] overflow-y-auto px-2 pb-2">
+          {/* quick add */}
+          <div className="mb-1 flex items-center gap-1 px-1">
+            <input
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && addTask()}
+              placeholder="Add a task…  #project"
+              className="flex-1 rounded-lg bg-white/[0.06] px-2 py-1.5 text-[13px] outline-none placeholder:text-white/30 focus:bg-white/10"
+            />
+            <button
+              onClick={() => setBindNext((b) => !b)}
+              title="Bind new task to current workspace"
+              className={`flex h-7 w-7 items-center justify-center rounded-lg text-sm ${
+                bindNext ? "bg-emerald-500/40 text-white" : "bg-white/[0.06] text-white/45"
+              }`}
+            >
+              ◎
+            </button>
+          </div>
+
+          <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
+            <Group title="Active" tasks={active} hideEmpty>
+              {active.map((t) => row(t))}
+            </Group>
+            <Group title="Waiting on you" accent="amber" tasks={waitingMe} hideEmpty>
+              {waitingMe.map((t) => row(t))}
+            </Group>
+            <Group title="Running" accent="sky" tasks={waitingMachine} hideEmpty>
+              {waitingMachine.map((t) => row(t))}
+            </Group>
+            {done.length > 0 && (
+              <div className="mt-1">
+                <button
+                  onClick={() => setDoneOpen((o) => !o)}
+                  className="flex w-full items-center gap-1 px-2 py-1 text-[10px] uppercase tracking-wide text-white/35 hover:text-white/60"
+                >
+                  {doneOpen ? "▾" : "▸"} Done · {done.length}
+                </button>
+                {doneOpen && (
+                  <Group title="" tasks={done}>
+                    {done.map((t) => row(t))}
+                  </Group>
+                )}
+              </div>
+            )}
+            {tasks.length === 0 && (
+              <div className="px-3 py-4 text-center text-[12px] text-white/35">
+                Nothing yet. Add your first thread above.
+              </div>
+            )}
+          </DndContext>
+        </div>
+      )}
+    </div>
+  );
+
+  function row(t: Task) {
+    return (
+      <TaskRow
+        key={t.id}
+        task={t}
+        onJump={jump}
+        onCycle={cycle}
+        onComplete={complete}
+        onReopen={reopen}
+        onDelete={del}
+        onBind={bind}
+        onRename={rename}
+      />
+    );
+  }
+}
+
+function Count({ color, n, label }: { color: string; n: number; label: string }) {
+  return (
+    <span className="flex items-center gap-1 whitespace-nowrap text-white/60">
+      <span className={`h-1.5 w-1.5 rounded-full ${color}`} />
+      {n} {label}
+    </span>
+  );
+}
+
+const ACCENT: Record<string, string> = {
+  amber: "text-amber-300/70",
+  sky: "text-sky-300/70",
+};
+
+function Group({
+  title,
+  tasks,
+  children,
+  accent,
+  hideEmpty,
+}: {
+  title: string;
+  tasks: Task[];
+  children: React.ReactNode;
+  accent?: string;
+  hideEmpty?: boolean;
+}) {
+  if (hideEmpty && tasks.length === 0) return null;
+  return (
+    <div className="mb-1">
+      {title && (
+        <div
+          className={`px-2 pb-0.5 pt-1 text-[10px] font-medium uppercase tracking-wide ${
+            accent ? ACCENT[accent] : "text-white/35"
+          }`}
+        >
+          {title}
+        </div>
+      )}
+      <SortableContext items={tasks.map((t) => t.id)} strategy={verticalListSortingStrategy}>
+        {children}
+      </SortableContext>
+    </div>
+  );
+}
