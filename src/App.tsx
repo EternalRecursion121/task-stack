@@ -189,7 +189,7 @@ export default function App() {
     <div
       ref={measureRef}
       style={{ width: collapsed ? "fit-content" : WIDTH }}
-      className="overflow-hidden bg-black/20 text-white/90"
+      className="overflow-hidden bg-neutral-900/80 text-white/90"
     >
       {/* header / collapsed pill */}
       <div className={`flex items-center gap-2 px-3 ${collapsed ? "py-1.5 whitespace-nowrap" : "py-2"}`}>

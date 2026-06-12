@@ -63,17 +63,18 @@ fn pin_to_corner(app: &AppHandle, use_cursor: bool) {
         return;
     };
     let (ww, wh) = (ws.width as i32, ws.height as i32);
-    let margin = (12.0 * mon.scale_factor()).round() as i32;
 
+    // Flush into the corner of the work area (no margin) — sits against the
+    // screen edges, just clear of the menu bar / Dock.
     let corner = {
         let db = app.state::<Db>();
         setting_or(&db, "corner", DEFAULT_CORNER)
     };
     let (x, y) = match corner.as_str() {
-        "top-left" => (ax + margin, ay + margin),
-        "bottom-left" => (ax + margin, ay + ah - wh - margin),
-        "bottom-right" => (ax + aw - ww - margin, ay + ah - wh - margin),
-        _ => (ax + aw - ww - margin, ay + margin), // top-right (default)
+        "top-left" => (ax, ay),
+        "bottom-left" => (ax, ay + ah - wh),
+        "bottom-right" => (ax + aw - ww, ay + ah - wh),
+        _ => (ax + aw - ww, ay), // top-right (default)
     };
     let _ = win.set_position(PhysicalPosition::new(x, y));
 }

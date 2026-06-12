@@ -30,8 +30,7 @@
         "titleBarStyle": "Transparent",
         "windowEffects": {
           "effects": ["hudWindow"],
-          "state": "active",
-          "radius": 16
+          "state": "active"
         }
       }
     ],
