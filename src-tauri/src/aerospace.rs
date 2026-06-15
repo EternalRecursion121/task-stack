@@ -112,16 +112,55 @@ pub fn visible_scene() -> Result<Vec<String>, String> {
     Ok(names)
 }
 
+/// Current workspace → monitor-id mapping. Lets us collapse a captured scene onto
+/// whatever monitors are actually connected right now.
+fn workspace_monitors() -> Result<std::collections::HashMap<String, String>, String> {
+    let out = run(&[
+        "list-workspaces",
+        "--all",
+        "--format",
+        "%{workspace}|%{monitor-id}",
+    ])?;
+    let mut map = std::collections::HashMap::new();
+    for line in out.lines() {
+        if let Some((ws, mon)) = line.trim().split_once('|') {
+            map.insert(ws.trim().to_string(), mon.trim().to_string());
+        }
+    }
+    Ok(map)
+}
+
 /// Restore a scene by focusing each workspace in turn. Each `workspace <name>`
 /// only affects its own monitor, so the screens end up showing the captured
-/// arrangement; the last name in the list receives keyboard focus. Best-effort
-/// per workspace — a vanished workspace doesn't abort the rest.
+/// arrangement; the last focus receives keyboard focus.
+///
+/// Before replaying, the scene is collapsed by the workspaces' *current* monitor:
+/// only the last workspace targeting each monitor survives. On the original setup
+/// this is a no-op; on fewer monitors (e.g. a laptop unplugged from its displays)
+/// the workspaces that now share a screen collapse to a single focus instead of
+/// flickering through each — and focus still lands on the captured-focused space,
+/// since it's last in the list. Best-effort per workspace; a vanished one doesn't
+/// abort the rest, and a failed mapping query falls back to focusing them all.
 pub fn focus_scene(names: &[String]) -> Result<(), String> {
     if names.is_empty() {
         return Err("empty scene".to_string());
     }
+    let plan: Vec<String> = match workspace_monitors() {
+        Ok(map) => {
+            let mut order: Vec<(String, String)> = Vec::new(); // (monitor, workspace)
+            for name in names {
+                // An unknown workspace gets its own bucket so it isn't dropped.
+                let mon = map.get(name).cloned().unwrap_or_else(|| format!("?{name}"));
+                order.retain(|(m, _)| m != &mon);
+                order.push((mon, name.clone()));
+            }
+            order.into_iter().map(|(_, n)| n).collect()
+        }
+        Err(_) => names.to_vec(),
+    };
+
     let mut last = Ok(());
-    for name in names {
+    for name in &plan {
         last = run(&["workspace", name]).map(|_| ());
     }
     last
