@@ -35,14 +35,15 @@ pnpm install
 pnpm tauri dev
 ```
 
-**Let AeroSpace leave the panel alone (important).** AeroSpace is a tiling window manager, so
-by default it will try to *tile* the always-on-top widget — which fights the app's own corner
-positioning in a feedback loop and hangs/crashes it. Add a float rule to `~/.aerospace.toml`
-so the panel is always floating, then `aerospace reload-config`:
+**Tiling window managers.** The widget is a non-activating macOS `NSPanel`, so tiling WMs
+like AeroSpace ignore it automatically — no config needed, and summoning it never steals
+focus from the app underneath. If you ever do see it get tiled, add a float rule to
+`~/.aerospace.toml` and `aerospace reload-config` (match by name — the dev build reports a
+null bundle id):
 
 ```toml
 [[on-window-detected]]
-if.app-id = 'com.samuelratnam.taskstack'    # task-stack corner widget — never tile it
+if.app-name-regex-substring = 'task-stack'    # never tile the corner widget
 run = 'layout floating'
 ```
 

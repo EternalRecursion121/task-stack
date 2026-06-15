@@ -9,6 +9,8 @@ use serde::Serialize;
 use tauri::menu::MenuBuilder;
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, State};
+#[cfg(target_os = "macos")]
+use tauri_nspanel::{ManagerExt, WebviewWindowExt};
 
 const DEFAULT_HOTKEY: &str = "CmdOrCtrl+Space";
 const DEFAULT_CORNER: &str = "top-right";
@@ -80,14 +82,42 @@ fn pin_to_corner(app: &AppHandle, use_cursor: bool) {
 }
 
 fn show_window(app: &AppHandle) {
+    pin_to_corner(app, true);
+    #[cfg(target_os = "macos")]
+    if let Ok(panel) = app.get_webview_panel("main") {
+        panel.show();
+        // Make it key (without activating the app) so typing and the ⌘-arrow
+        // corner shortcuts work immediately on summon.
+        panel.make_key_window();
+        return;
+    }
     if let Some(win) = app.get_webview_window("main") {
-        pin_to_corner(app, true);
         let _ = win.show();
         let _ = win.set_focus();
     }
 }
 
+fn hide_panel(app: &AppHandle) {
+    #[cfg(target_os = "macos")]
+    if let Ok(panel) = app.get_webview_panel("main") {
+        panel.order_out(None);
+        return;
+    }
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.hide();
+    }
+}
+
 fn toggle_window(app: &AppHandle) {
+    #[cfg(target_os = "macos")]
+    if let Ok(panel) = app.get_webview_panel("main") {
+        if panel.is_visible() {
+            panel.order_out(None);
+        } else {
+            show_window(app);
+        }
+        return;
+    }
     if let Some(win) = app.get_webview_window("main") {
         if win.is_visible().unwrap_or(false) {
             let _ = win.hide();
@@ -326,9 +356,7 @@ fn jump(db: State<Db>, jump_type: String, jump_value: String) -> Result<(), Stri
 
 #[tauri::command]
 fn hide_window(app: AppHandle) {
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.hide();
-    }
+    hide_panel(&app);
 }
 
 /// Resize the panel to hug its content, then re-pin to the configured corner.
@@ -373,6 +401,11 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_positioner::init());
 
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder.plugin(tauri_nspanel::init());
+    }
+
     #[cfg(desktop)]
     {
         builder = builder
@@ -413,6 +446,31 @@ pub fn run() {
             // No dock icon — live entirely in the tray + floating panel.
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
+            // Swizzle the window into a non-activating NSPanel: a tiling WM like
+            // AeroSpace won't try to manage/tile it, and summoning it never steals
+            // focus or activates the app underneath.
+            #[cfg(target_os = "macos")]
+            {
+                use cocoa::appkit::{NSMainMenuWindowLevel, NSWindowCollectionBehavior};
+                // NSWindowStyleMaskNonactivatingPanel — clicking the panel makes it
+                // key (so you can type) without activating the app.
+                const NONACTIVATING_PANEL: i32 = 1 << 7;
+
+                if let Some(win) = app.get_webview_window("main") {
+                    if let Ok(panel) = win.to_panel() {
+                        panel.set_style_mask(NONACTIVATING_PANEL);
+                        panel.set_level((NSMainMenuWindowLevel + 1) as i32);
+                        // Float above everything, follow across spaces, and stay put
+                        // when another app goes fullscreen.
+                        panel.set_collection_behaviour(
+                            NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces
+                                | NSWindowCollectionBehavior::NSWindowCollectionBehaviorStationary
+                                | NSWindowCollectionBehavior::NSWindowCollectionBehaviorFullScreenAuxiliary,
+                        );
+                    }
+                }
+            }
 
             // Tray with a small menu.
             let menu = MenuBuilder::new(app)
@@ -464,7 +522,7 @@ pub fn run() {
             // Closing the panel just hides it; the app keeps running in the tray.
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                let _ = window.hide();
+                hide_panel(window.app_handle());
             }
         })
         .run(tauri::generate_context!())
