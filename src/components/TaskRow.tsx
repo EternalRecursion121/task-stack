@@ -22,7 +22,7 @@ interface Props {
   onComplete: (t: Task) => void;
   onReopen: (t: Task) => void;
   onDelete: (t: Task) => void;
-  onBind: (t: Task) => void;
+  onBind: (t: Task, focusedOnly?: boolean) => void;
   onRename: (t: Task, title: string) => void;
 }
 
@@ -142,7 +142,10 @@ export default function TaskRow({
             <IconBtn title="Cycle state" onClick={() => onCycle(task)}>
               ◑
             </IconBtn>
-            <IconBtn title="Bind current spaces (all monitors)" onClick={() => onBind(task)}>
+            <IconBtn
+              title="Bind current spaces (all monitors) — ⌥-click for focused monitor only"
+              onClick={(e) => onBind(task, e.altKey)}
+            >
               ◎
             </IconBtn>
             <IconBtn title="Complete" onClick={() => onComplete(task)}>
@@ -170,14 +173,14 @@ function IconBtn({
 }: {
   children: React.ReactNode;
   title: string;
-  onClick: () => void;
+  onClick: (e: React.MouseEvent) => void;
 }) {
   return (
     <button
       title={title}
       onClick={(e) => {
         e.stopPropagation();
-        onClick();
+        onClick(e);
       }}
       onPointerDown={(e) => e.stopPropagation()}
       className="flex h-5 w-5 items-center justify-center rounded text-[11px] text-white/55 hover:bg-white/15 hover:text-white"

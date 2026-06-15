@@ -147,12 +147,20 @@ export default function App() {
   const jump = (t: Task) => {
     if (t.jump_type && t.jump_value) api.jump(t.jump_type, t.jump_value).catch(() => {});
   };
-  const bind = async (t: Task) => {
+  const bind = async (t: Task, focusedOnly = false) => {
     try {
-      const scene = await api.aerospaceVisibleScene();
-      if (!scene.length) return;
-      const updated = await api.setJump(t.id, "scene", JSON.stringify(scene));
-      replace(updated);
+      if (focusedOnly) {
+        // Just the focused monitor's workspace — stored as a plain workspace jump.
+        const ws = await api.aerospaceFocusedWorkspace();
+        const updated = await api.setJump(t.id, "workspace", ws);
+        replace(updated);
+      } else {
+        // The whole arrangement across every monitor.
+        const scene = await api.aerospaceVisibleScene();
+        if (!scene.length) return;
+        const updated = await api.setJump(t.id, "scene", JSON.stringify(scene));
+        replace(updated);
+      }
     } catch {
       /* ignore when aerospace unavailable */
     }
