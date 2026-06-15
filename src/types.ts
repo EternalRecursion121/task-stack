@@ -1,6 +1,6 @@
 export type TaskState = "active" | "waiting" | "done";
 export type WaitingKind = "me" | "machine";
-export type JumpType = "workspace" | "window" | "url" | "command";
+export type JumpType = "workspace" | "scene" | "window" | "url" | "command";
 
 export interface Task {
   id: string;

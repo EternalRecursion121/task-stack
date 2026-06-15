@@ -284,6 +284,11 @@ fn aerospace_focused_workspace() -> Result<String, String> {
 }
 
 #[tauri::command]
+fn aerospace_visible_scene() -> Result<Vec<String>, String> {
+    aerospace::visible_scene()
+}
+
+#[tauri::command]
 fn aerospace_enable() -> Result<(), String> {
     Command::new("aerospace")
         .args(["enable", "on"])
@@ -297,6 +302,12 @@ fn jump(db: State<Db>, jump_type: String, jump_value: String) -> Result<(), Stri
     let summon = setting_or(&db, "jump_mode", "workspace") == "summon";
     match jump_type.as_str() {
         "workspace" => aerospace::focus_workspace(&jump_value, summon),
+        // A scene is a JSON list of workspaces, one per monitor. Summon doesn't
+        // apply — pulling them all to one screen would defeat the arrangement.
+        "scene" => {
+            let names: Vec<String> = serde_json::from_str(&jump_value).map_err(map_err)?;
+            aerospace::focus_scene(&names)
+        }
         "window" => aerospace::focus_window(&jump_value),
         "url" => Command::new("open")
             .arg(&jump_value)
@@ -392,6 +403,7 @@ pub fn run() {
             aerospace_status,
             aerospace_list_workspaces,
             aerospace_focused_workspace,
+            aerospace_visible_scene,
             aerospace_enable,
             jump,
             hide_window,

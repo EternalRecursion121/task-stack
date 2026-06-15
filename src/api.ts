@@ -36,6 +36,7 @@ export const api = {
   aerospaceStatus: () => invoke<AeroStatus>("aerospace_status"),
   aerospaceListWorkspaces: () => invoke<string[]>("aerospace_list_workspaces"),
   aerospaceFocusedWorkspace: () => invoke<string>("aerospace_focused_workspace"),
+  aerospaceVisibleScene: () => invoke<string[]>("aerospace_visible_scene"),
   aerospaceEnable: () => invoke<void>("aerospace_enable"),
 
   jump: (jump_type: JumpType, jump_value: string) =>

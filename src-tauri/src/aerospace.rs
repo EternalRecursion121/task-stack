@@ -85,3 +85,44 @@ pub fn focus_workspace(name: &str, summon: bool) -> Result<(), String> {
 pub fn focus_window(window_id: &str) -> Result<(), String> {
     run(&["focus", "--window-id", window_id]).map(|_| ())
 }
+
+/// Capture the current multi-monitor arrangement: the visible workspace on every
+/// monitor. AeroSpace workspaces are single-monitor, so a "scene" is the set of
+/// workspaces visible across all screens at once. The focused workspace is moved
+/// to the end so that replaying the scene leaves keyboard focus where it was.
+pub fn visible_scene() -> Result<Vec<String>, String> {
+    let out = run(&["list-workspaces", "--monitor", "all", "--visible"])?;
+    let mut names: Vec<String> = out
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    // Dedupe (one workspace per monitor) while preserving order.
+    let mut seen = std::collections::HashSet::new();
+    names.retain(|n| seen.insert(n.clone()));
+
+    // Replay in an order that ends on the previously-focused workspace.
+    if let Ok(focused) = focused_workspace() {
+        if let Some(pos) = names.iter().position(|n| n == &focused) {
+            let f = names.remove(pos);
+            names.push(f);
+        }
+    }
+    Ok(names)
+}
+
+/// Restore a scene by focusing each workspace in turn. Each `workspace <name>`
+/// only affects its own monitor, so the screens end up showing the captured
+/// arrangement; the last name in the list receives keyboard focus. Best-effort
+/// per workspace — a vanished workspace doesn't abort the rest.
+pub fn focus_scene(names: &[String]) -> Result<(), String> {
+    if names.is_empty() {
+        return Err("empty scene".to_string());
+    }
+    let mut last = Ok(());
+    for name in names {
+        last = run(&["workspace", name]).map(|_| ());
+    }
+    last
+}

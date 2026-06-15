@@ -51,6 +51,20 @@ export default function TaskRow({
   const hasJump = !!task.jump_type && !!task.jump_value;
   const done = task.state === "done";
 
+  // A scene is a JSON list of workspaces (one per monitor); render it as a
+  // dotted trail of space names. Everything else shows its raw value.
+  let jumpLabel = task.jump_value ?? "";
+  let sceneCount = 0;
+  if (task.jump_type === "scene" && task.jump_value) {
+    try {
+      const names: string[] = JSON.parse(task.jump_value);
+      sceneCount = names.length;
+      jumpLabel = names.join(" · ");
+    } catch {
+      /* fall back to the raw value */
+    }
+  }
+
   const commitRename = () => {
     const next = draft.trim();
     if (next && next !== task.title) onRename(task, next);
@@ -110,7 +124,14 @@ export default function TaskRow({
           </div>
         )}
         {hasJump && !editing && (
-          <div className="truncate text-[10px] text-white/35">→ {task.jump_value}</div>
+          <div className="flex items-center gap-1 truncate text-[10px] text-white/35">
+            {sceneCount > 1 && (
+              <span className="shrink-0 rounded bg-white/[0.08] px-1 text-white/45" title={`${sceneCount} spaces across monitors`}>
+                ⧉ {sceneCount}
+              </span>
+            )}
+            <span className="truncate">→ {jumpLabel}</span>
+          </div>
         )}
       </div>
 
@@ -121,7 +142,7 @@ export default function TaskRow({
             <IconBtn title="Cycle state" onClick={() => onCycle(task)}>
               ◑
             </IconBtn>
-            <IconBtn title="Bind current workspace" onClick={() => onBind(task)}>
+            <IconBtn title="Bind current spaces (all monitors)" onClick={() => onBind(task)}>
               ◎
             </IconBtn>
             <IconBtn title="Complete" onClick={() => onComplete(task)}>

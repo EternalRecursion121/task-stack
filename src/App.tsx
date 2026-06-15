@@ -10,7 +10,7 @@ import {
 import { SortableContext, arrayMove, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { listen } from "@tauri-apps/api/event";
 import { api } from "./api";
-import type { AeroStatus, Settings as SettingsT, Task, WaitingKind } from "./types";
+import type { AeroStatus, JumpType, Settings as SettingsT, Task, WaitingKind } from "./types";
 import TaskRow from "./components/TaskRow";
 import Settings from "./components/Settings";
 
@@ -108,12 +108,15 @@ export default function App() {
     const m = raw.match(/#(\S+)/);
     const project = m ? m[1] : null;
     const title = raw.replace(/#\S+/, "").trim() || raw;
-    let jumpType: "workspace" | null = null;
+    let jumpType: JumpType | null = null;
     let jumpValue: string | null = null;
     if (bindNext) {
       try {
-        jumpValue = await api.aerospaceFocusedWorkspace();
-        jumpType = "workspace";
+        const scene = await api.aerospaceVisibleScene();
+        if (scene.length) {
+          jumpValue = JSON.stringify(scene);
+          jumpType = "scene";
+        }
       } catch {
         /* aerospace unavailable — add without a binding */
       }
@@ -146,8 +149,9 @@ export default function App() {
   };
   const bind = async (t: Task) => {
     try {
-      const ws = await api.aerospaceFocusedWorkspace();
-      const updated = await api.setJump(t.id, "workspace", ws);
+      const scene = await api.aerospaceVisibleScene();
+      if (!scene.length) return;
+      const updated = await api.setJump(t.id, "scene", JSON.stringify(scene));
       replace(updated);
     } catch {
       /* ignore when aerospace unavailable */
@@ -245,7 +249,7 @@ export default function App() {
             />
             <button
               onClick={() => setBindNext((b) => !b)}
-              title="Bind new task to current workspace"
+              title="Bind new task to current spaces (all monitors)"
               className={`flex h-7 w-7 items-center justify-center rounded-lg text-sm ${
                 bindNext ? "bg-emerald-500/40 text-white" : "bg-white/[0.06] text-white/45"
               }`}
