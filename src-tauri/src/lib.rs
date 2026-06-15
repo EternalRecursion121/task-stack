@@ -10,7 +10,7 @@ use tauri::menu::MenuBuilder;
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, State};
 
-const DEFAULT_HOTKEY: &str = "CmdOrCtrl+Control+T";
+const DEFAULT_HOTKEY: &str = "CmdOrCtrl+Space";
 const DEFAULT_CORNER: &str = "top-right";
 
 // ---------- helpers ----------

@@ -19,7 +19,7 @@ const MAX_HEIGHT = 680;
 
 const DEFAULT_SETTINGS: SettingsT = {
   corner: "top-right",
-  hotkey: "CmdOrCtrl+Control+T",
+  hotkey: "CmdOrCtrl+Space",
   jump_mode: "workspace",
   auto_collapse: false,
 };
@@ -92,6 +92,29 @@ export default function App() {
 
   const patchSettings = (patch: Partial<SettingsT>) =>
     setSettings((s) => ({ ...s, ...patch }));
+
+  // ---- ⌘+arrow snaps the panel between corners (when it's focused) ----
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!e.metaKey || e.shiftKey || e.altKey || e.ctrlKey) return;
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA") return;
+      const [v, h] = settings.corner.split("-");
+      let next = settings.corner;
+      if (e.key === "ArrowLeft") next = `${v}-left`;
+      else if (e.key === "ArrowRight") next = `${v}-right`;
+      else if (e.key === "ArrowUp") next = `top-${h}`;
+      else if (e.key === "ArrowDown") next = `bottom-${h}`;
+      else return;
+      e.preventDefault();
+      if (next !== settings.corner) {
+        api.setCorner(next);
+        patchSettings({ corner: next });
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [settings.corner]);
 
   // ---- groups ----
   const active = tasks.filter((t) => t.state === "active");
