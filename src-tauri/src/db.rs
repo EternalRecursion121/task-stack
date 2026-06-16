@@ -10,10 +10,8 @@ pub struct Db(pub Mutex<Connection>);
 pub struct Task {
     pub id: String,
     pub title: String,
-    /// active | waiting | done
+    /// active | done
     pub state: String,
-    /// me | machine | null  (only meaningful when state == "waiting")
-    pub waiting_kind: Option<String>,
     pub project: Option<String>,
     /// workspace | window | url | command | null
     pub jump_type: Option<String>,
@@ -37,7 +35,6 @@ fn row_to_task(row: &Row) -> rusqlite::Result<Task> {
         id: row.get("id")?,
         title: row.get("title")?,
         state: row.get("state")?,
-        waiting_kind: row.get("waiting_kind")?,
         project: row.get("project")?,
         jump_type: row.get("jump_type")?,
         jump_value: row.get("jump_value")?,
@@ -62,7 +59,6 @@ pub fn open() -> rusqlite::Result<Connection> {
             id            TEXT PRIMARY KEY,
             title         TEXT NOT NULL,
             state         TEXT NOT NULL DEFAULT 'active',
-            waiting_kind  TEXT,
             project       TEXT,
             jump_type     TEXT,
             jump_value    TEXT,
@@ -77,6 +73,9 @@ pub fn open() -> rusqlite::Result<Connection> {
             value TEXT NOT NULL
          );",
     )?;
+    // Older databases used a separate "waiting" state; it's now just position
+    // in the queue, so fold any leftover waiting tasks back into active.
+    conn.execute("UPDATE tasks SET state = 'active' WHERE state = 'waiting'", [])?;
     Ok(conn)
 }
 
@@ -111,18 +110,12 @@ pub fn create_task(
     get_task(conn, &id)
 }
 
-pub fn set_state(
-    conn: &Connection,
-    id: &str,
-    state: &str,
-    waiting_kind: Option<String>,
-) -> rusqlite::Result<Task> {
+pub fn set_state(conn: &Connection, id: &str, state: &str) -> rusqlite::Result<Task> {
     let now = now_millis();
     let completed_at = if state == "done" { Some(now) } else { None };
-    let kind = if state == "waiting" { waiting_kind } else { None };
     conn.execute(
-        "UPDATE tasks SET state = ?2, waiting_kind = ?3, completed_at = ?4, updated_at = ?5 WHERE id = ?1",
-        rusqlite::params![id, state, kind, completed_at, now],
+        "UPDATE tasks SET state = ?2, completed_at = ?3, updated_at = ?4 WHERE id = ?1",
+        rusqlite::params![id, state, completed_at, now],
     )?;
     get_task(conn, id)
 }
