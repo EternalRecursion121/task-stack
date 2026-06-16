@@ -1,12 +1,10 @@
-export type TaskState = "active" | "waiting" | "done";
-export type WaitingKind = "me" | "machine";
+export type TaskState = "active" | "done";
 export type JumpType = "workspace" | "scene" | "window" | "url" | "command";
 
 export interface Task {
   id: string;
   title: string;
   state: TaskState;
-  waiting_kind: WaitingKind | null;
   project: string | null;
   jump_type: JumpType | null;
   jump_value: string | null;
@@ -26,6 +24,8 @@ export interface AeroStatus {
 export interface Settings {
   corner: string;
   hotkey: string;
+  capture_hotkey: string;
+  capture_ws_hotkey: string;
   jump_mode: string;
   auto_collapse: boolean;
 }

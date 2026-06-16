@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AeroStatus, Bootstrap, JumpType, Task, TaskState, WaitingKind } from "./types";
+import type { AeroStatus, Bootstrap, JumpType, Task, TaskState } from "./types";
 
 export const api = {
   bootstrap: () => invoke<Bootstrap>("bootstrap"),
@@ -8,12 +8,12 @@ export const api = {
   createTask: (
     title: string,
     project: string | null,
-    jump_type: JumpType | null,
-    jump_value: string | null,
-  ) => invoke<Task>("create_task", { title, project, jump_type, jump_value }),
+    jumpType: JumpType | null,
+    jumpValue: string | null,
+  ) => invoke<Task>("create_task", { title, project, jumpType, jumpValue }),
 
-  setState: (id: string, state: TaskState, waiting_kind: WaitingKind | null) =>
-    invoke<Task>("set_state", { id, state, waiting_kind }),
+  setState: (id: string, state: TaskState) =>
+    invoke<Task>("set_state", { id, state }),
 
   updateTitle: (id: string, title: string, project: string | null) =>
     invoke<Task>("update_title", { id, title, project }),
@@ -21,8 +21,8 @@ export const api = {
   setNotes: (id: string, notes: string | null) =>
     invoke<Task>("set_notes", { id, notes }),
 
-  setJump: (id: string, jump_type: JumpType | null, jump_value: string | null) =>
-    invoke<Task>("set_jump", { id, jump_type, jump_value }),
+  setJump: (id: string, jumpType: JumpType | null, jumpValue: string | null) =>
+    invoke<Task>("set_jump", { id, jumpType, jumpValue }),
 
   deleteTask: (id: string) => invoke<void>("delete_task", { id }),
   reorder: (ids: string[]) => invoke<void>("reorder", { ids }),
@@ -30,6 +30,8 @@ export const api = {
   setSetting: (key: string, value: string) => invoke<void>("set_setting", { key, value }),
   setCorner: (corner: string) => invoke<void>("set_corner", { corner }),
   setHotkey: (hotkey: string) => invoke<void>("set_hotkey", { hotkey }),
+  setCaptureHotkey: (hotkey: string) => invoke<void>("set_capture_hotkey", { hotkey }),
+  setCaptureWsHotkey: (hotkey: string) => invoke<void>("set_capture_ws_hotkey", { hotkey }),
   getAutostart: () => invoke<boolean>("get_autostart"),
   setAutostart: (enabled: boolean) => invoke<void>("set_autostart", { enabled }),
 
@@ -39,8 +41,8 @@ export const api = {
   aerospaceVisibleScene: () => invoke<string[]>("aerospace_visible_scene"),
   aerospaceEnable: () => invoke<void>("aerospace_enable"),
 
-  jump: (jump_type: JumpType, jump_value: string) =>
-    invoke<void>("jump", { jump_type, jump_value }),
+  jump: (jumpType: JumpType, jumpValue: string) =>
+    invoke<void>("jump", { jumpType, jumpValue }),
 
   hideWindow: () => invoke<void>("hide_window"),
   setSize: (width: number, height: number) => invoke<void>("set_size", { width, height }),
