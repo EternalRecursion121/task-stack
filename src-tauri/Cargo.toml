@@ -9,6 +9,11 @@ edition = "2021"
 name = "task_stack_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[lints.rust]
+# objc 0.2's msg_send!/sel_impl! macros emit `cfg(feature = "cargo-clippy")`;
+# declare it expected so the macro doesn't spam unexpected_cfgs warnings.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -31,3 +36,5 @@ tauri-plugin-autostart = "2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa = "0.26"
+objc = "0.2"
+block = "0.1"

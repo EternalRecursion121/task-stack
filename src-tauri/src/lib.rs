@@ -8,11 +8,13 @@ use db::{Db, Task};
 use serde::Serialize;
 use tauri::menu::MenuBuilder;
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, State};
+use tauri::{AppHandle, Emitter, Manager, Monitor, PhysicalPosition, State, WebviewWindow};
 #[cfg(target_os = "macos")]
 use tauri_nspanel::{ManagerExt, WebviewWindowExt};
 
 const DEFAULT_HOTKEY: &str = "CmdOrCtrl+Space";
+const DEFAULT_CAPTURE_HOTKEY: &str = "CmdOrCtrl+Shift+Space";
+const DEFAULT_CAPTURE_WS_HOTKEY: &str = "CmdOrCtrl+Alt+Space";
 const DEFAULT_CORNER: &str = "top-right";
 
 // ---------- helpers ----------
@@ -29,6 +31,25 @@ fn setting_or(db: &State<Db>, key: &str, fallback: &str) -> String {
         .unwrap_or_else(|| fallback.to_string())
 }
 
+/// The monitor whose physical bounds contain the mouse cursor.
+///
+/// Found by manual containment against each monitor's rectangle, in consistent
+/// physical coordinates. This handles monitors stacked vertically or placed at
+/// negative offsets (e.g. an external mounted *above* the built-in) — cases
+/// where `monitor_from_point` returns nothing and would otherwise leave the
+/// panel stranded on its previous screen.
+fn monitor_under_cursor(app: &AppHandle, win: &WebviewWindow) -> Option<Monitor> {
+    let pos = app.cursor_position().ok()?;
+    win.available_monitors().ok()?.into_iter().find(|m| {
+        let (p, s) = (m.position(), m.size());
+        let (x0, y0) = (p.x as f64, p.y as f64);
+        pos.x >= x0
+            && pos.x < x0 + s.width as f64
+            && pos.y >= y0
+            && pos.y < y0 + s.height as f64
+    })
+}
+
 /// Pin the panel to the configured corner.
 ///
 /// When `use_cursor` is true (summon via hotkey/tray) the panel snaps to the
@@ -43,9 +64,7 @@ fn pin_to_corner(app: &AppHandle, use_cursor: bool) {
     // Pick the target monitor: cursor's monitor when summoning, else the
     // window's current monitor, falling back to the primary.
     let cursor_mon = if use_cursor {
-        app.cursor_position()
-            .ok()
-            .and_then(|c| win.monitor_from_point(c.x, c.y).ok().flatten())
+        monitor_under_cursor(app, &win)
     } else {
         None
     };
@@ -134,6 +153,8 @@ struct Bootstrap {
     tasks: Vec<Task>,
     corner: String,
     hotkey: String,
+    capture_hotkey: String,
+    capture_ws_hotkey: String,
     jump_mode: String,
     auto_collapse: bool,
     aerospace: aerospace::AeroStatus,
@@ -149,6 +170,12 @@ fn bootstrap(db: State<Db>) -> Result<Bootstrap, String> {
     let hotkey = db::get_setting(&conn, "hotkey")
         .map_err(map_err)?
         .unwrap_or_else(|| DEFAULT_HOTKEY.to_string());
+    let capture_hotkey = db::get_setting(&conn, "capture_hotkey")
+        .map_err(map_err)?
+        .unwrap_or_else(|| DEFAULT_CAPTURE_HOTKEY.to_string());
+    let capture_ws_hotkey = db::get_setting(&conn, "capture_ws_hotkey")
+        .map_err(map_err)?
+        .unwrap_or_else(|| DEFAULT_CAPTURE_WS_HOTKEY.to_string());
     let jump_mode = db::get_setting(&conn, "jump_mode")
         .map_err(map_err)?
         .unwrap_or_else(|| "workspace".to_string());
@@ -161,6 +188,8 @@ fn bootstrap(db: State<Db>) -> Result<Bootstrap, String> {
         tasks,
         corner,
         hotkey,
+        capture_hotkey,
+        capture_ws_hotkey,
         jump_mode,
         auto_collapse,
         aerospace: aerospace::status(),
@@ -186,14 +215,9 @@ fn create_task(
 }
 
 #[tauri::command]
-fn set_state(
-    db: State<Db>,
-    id: String,
-    state: String,
-    waiting_kind: Option<String>,
-) -> Result<Task, String> {
+fn set_state(db: State<Db>, id: String, state: String) -> Result<Task, String> {
     let conn = db.0.lock().map_err(map_err)?;
-    db::set_state(&conn, &id, &state, waiting_kind).map_err(map_err)
+    db::set_state(&conn, &id, &state).map_err(map_err)
 }
 
 #[tauri::command]
@@ -260,7 +284,25 @@ fn set_hotkey(app: AppHandle, db: State<Db>, hotkey: String) -> Result<(), Strin
         let conn = db.0.lock().map_err(map_err)?;
         db::set_setting(&conn, "hotkey", &hotkey).map_err(map_err)?;
     }
-    register_hotkey(&app, &hotkey)
+    register_hotkeys(&app)
+}
+
+#[tauri::command]
+fn set_capture_hotkey(app: AppHandle, db: State<Db>, hotkey: String) -> Result<(), String> {
+    {
+        let conn = db.0.lock().map_err(map_err)?;
+        db::set_setting(&conn, "capture_hotkey", &hotkey).map_err(map_err)?;
+    }
+    register_hotkeys(&app)
+}
+
+#[tauri::command]
+fn set_capture_ws_hotkey(app: AppHandle, db: State<Db>, hotkey: String) -> Result<(), String> {
+    {
+        let conn = db.0.lock().map_err(map_err)?;
+        db::set_setting(&conn, "capture_ws_hotkey", &hotkey).map_err(map_err)?;
+    }
+    register_hotkeys(&app)
 }
 
 #[tauri::command]
@@ -297,38 +339,45 @@ fn set_autostart(app: AppHandle, enabled: bool) -> Result<(), String> {
 }
 
 // ---------- aerospace commands ----------
+//
+// All of these shell out to the `aerospace` CLI, which blocks. They're `async`
+// so Tauri runs them off the main thread — a synchronous version freezes the UI
+// (a brief beachball) for the duration of the subprocess, and risks deadlock for
+// any call that makes AeroSpace rearrange windows. See `jump` for the full note.
 
 #[tauri::command]
-fn aerospace_status() -> aerospace::AeroStatus {
+async fn aerospace_status() -> aerospace::AeroStatus {
     aerospace::status()
 }
 
 #[tauri::command]
-fn aerospace_list_workspaces() -> Result<Vec<String>, String> {
+async fn aerospace_list_workspaces() -> Result<Vec<String>, String> {
     aerospace::list_workspaces()
 }
 
 #[tauri::command]
-fn aerospace_focused_workspace() -> Result<String, String> {
+async fn aerospace_focused_workspace() -> Result<String, String> {
     aerospace::focused_workspace()
 }
 
 #[tauri::command]
-fn aerospace_visible_scene() -> Result<Vec<String>, String> {
+async fn aerospace_visible_scene() -> Result<Vec<String>, String> {
     aerospace::visible_scene()
 }
 
 #[tauri::command]
-fn aerospace_enable() -> Result<(), String> {
-    Command::new("aerospace")
-        .args(["enable", "on"])
-        .output()
-        .map_err(map_err)
-        .map(|_| ())
+async fn aerospace_enable() -> Result<(), String> {
+    aerospace::enable()
 }
 
+// Async so Tauri runs it OFF the main thread. `aerospace workspace <name>`
+// triggers AeroSpace to rearrange windows via the Accessibility API, which calls
+// back into our app's main thread — if this ran on the main thread (sync command),
+// it would block waiting for AeroSpace while AeroSpace waits for us: a deadlock
+// (beachball) on any real workspace switch. Off the main thread, the UI stays
+// responsive to those AX callbacks and the switch completes.
 #[tauri::command]
-fn jump(db: State<Db>, jump_type: String, jump_value: String) -> Result<(), String> {
+async fn jump(db: State<'_, Db>, jump_type: String, jump_value: String) -> Result<(), String> {
     let summon = setting_or(&db, "jump_mode", "workspace") == "summon";
     match jump_type.as_str() {
         "workspace" => aerospace::focus_workspace(&jump_value, summon),
@@ -373,24 +422,147 @@ fn set_size(app: AppHandle, width: f64, height: f64) -> Result<(), String> {
 
 // ---------- shell setup ----------
 
-fn register_hotkey(app: &AppHandle, hotkey: &str) -> Result<(), String> {
+/// Register all global shortcuts: the summon toggle and the two workspace-capture
+/// hotkeys (full scene across monitors, and the focused workspace only). Reads the
+/// current bindings from settings each time, so the setters just re-call this.
+/// `unregister_all` first keeps it idempotent.
+fn register_hotkeys(app: &AppHandle) -> Result<(), String> {
     #[cfg(desktop)]
     {
         use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+        let (summon, capture_scene, capture_ws) = {
+            let db = app.state::<Db>();
+            (
+                setting_or(&db, "hotkey", DEFAULT_HOTKEY),
+                setting_or(&db, "capture_hotkey", DEFAULT_CAPTURE_HOTKEY),
+                setting_or(&db, "capture_ws_hotkey", DEFAULT_CAPTURE_WS_HOTKEY),
+            )
+        };
         let gs = app.global_shortcut();
         let _ = gs.unregister_all();
-        gs.on_shortcut(hotkey, move |app, _shortcut, event| {
+        gs.on_shortcut(summon.as_str(), move |app, _shortcut, event| {
             if event.state() == ShortcutState::Pressed {
                 toggle_window(app);
             }
         })
-        .map_err(map_err)
+        .map_err(map_err)?;
+        // Capture the full multi-monitor scene. Empty/invalid binding is skipped,
+        // not fatal.
+        if !capture_scene.trim().is_empty() {
+            let _ = gs.on_shortcut(capture_scene.as_str(), move |app, _shortcut, event| {
+                if event.state() == ShortcutState::Pressed {
+                    capture_workspace(app, false);
+                }
+            });
+        }
+        // Capture just the focused monitor's workspace.
+        if !capture_ws.trim().is_empty() {
+            let _ = gs.on_shortcut(capture_ws.as_str(), move |app, _shortcut, event| {
+                if event.state() == ShortcutState::Pressed {
+                    capture_workspace(app, true);
+                }
+            });
+        }
+        Ok(())
     }
     #[cfg(not(desktop))]
     {
-        let _ = (app, hotkey);
+        let _ = app;
         Ok(())
     }
+}
+
+/// Summon the widget and tell the UI to capture into a new, title-editing task.
+/// `focused_only` distinguishes a single-workspace binding (the focused monitor)
+/// from the full multi-monitor scene. The scene/workspace query + task creation
+/// happen on the JS side (async, off the main thread) — here we only show + emit.
+fn capture_workspace(app: &AppHandle, focused_only: bool) {
+    show_window(app);
+    let _ = app.emit("capture-workspace", focused_only);
+}
+
+/// Move the panel one corner in the given direction, persist it, and notify the
+/// UI so the Settings view stays in sync.
+#[cfg(target_os = "macos")]
+fn cycle_corner(app: &AppHandle, dir: &str) {
+    let current = {
+        let db = app.state::<Db>();
+        setting_or(&db, "corner", DEFAULT_CORNER)
+    };
+    let (v, h) = current.split_once('-').unwrap_or(("top", "right"));
+    let next = match dir {
+        "left" => format!("{v}-left"),
+        "right" => format!("{v}-right"),
+        "up" => format!("top-{h}"),
+        "down" => format!("bottom-{h}"),
+        _ => return,
+    };
+    if next == current {
+        return;
+    }
+    {
+        let db = app.state::<Db>();
+        let locked = db.0.lock();
+        if let Ok(conn) = locked {
+            let _ = db::set_setting(&conn, "corner", &next);
+        }
+    }
+    pin_to_corner(app, false);
+    let _ = app.emit("corner-changed", next);
+}
+
+/// Install a native key-down monitor for ⌘↑ / ⌘↓ corner snapping.
+///
+/// WKWebView swallows ⌘↑/⌘↓ (its scroll-to-top/bottom commands) before they
+/// reach the web page, so the JS handler only ever sees ⌘←/⌘→. A local NSEvent
+/// monitor catches the event first and consumes it. It fires only while our app
+/// is key (i.e. the panel is summoned), so it never steals ⌘-arrows globally.
+#[cfg(target_os = "macos")]
+// cocoa's id/nil are deprecated for objc2, but this matches the objc 0.2 stack
+// tauri-nspanel already pulls in.
+#[allow(deprecated)]
+fn install_corner_key_monitor(app: &AppHandle) {
+    use block::ConcreteBlock;
+    use cocoa::base::{id, nil};
+    use objc::{class, msg_send, sel, sel_impl};
+
+    const NS_EVENT_MASK_KEY_DOWN: u64 = 1 << 10;
+    const NS_CMD: u64 = 1 << 20; // NSEventModifierFlagCommand
+    const NS_SHIFT: u64 = 1 << 17;
+    const NS_CTRL: u64 = 1 << 18;
+    const NS_OPT: u64 = 1 << 19;
+    const FLAGS_MASK: u64 = 0xffff_0000; // device-independent modifier flags
+    const KEY_DOWN: u16 = 125;
+    const KEY_UP: u16 = 126;
+
+    let handle = app.clone();
+    let block = ConcreteBlock::new(move |event: id| -> id {
+        unsafe {
+            let flags: u64 = msg_send![event, modifierFlags];
+            let cmd_only = {
+                let f = flags & FLAGS_MASK;
+                (f & NS_CMD) != 0 && (f & (NS_SHIFT | NS_CTRL | NS_OPT)) == 0
+            };
+            if !cmd_only {
+                return event;
+            }
+            let key_code: u16 = msg_send![event, keyCode];
+            let dir = match key_code {
+                KEY_UP => "up",
+                KEY_DOWN => "down",
+                _ => return event, // ⌘←/⌘→ flow through to the web page's handler
+            };
+            cycle_corner(&handle, dir);
+            nil // consume — the webview never scrolls
+        }
+    });
+    let block = block.copy();
+    unsafe {
+        let _: id = msg_send![class!(NSEvent),
+            addLocalMonitorForEventsMatchingMask: NS_EVENT_MASK_KEY_DOWN
+            handler: &*block];
+    }
+    std::mem::forget(block); // AppKit retains it; keep ours alive for the app's life
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -431,6 +603,8 @@ pub fn run() {
             set_setting,
             set_corner,
             set_hotkey,
+            set_capture_hotkey,
+            set_capture_ws_hotkey,
             get_autostart,
             set_autostart,
             aerospace_status,
@@ -452,22 +626,33 @@ pub fn run() {
             // focus or activates the app underneath.
             #[cfg(target_os = "macos")]
             {
-                use cocoa::appkit::{NSMainMenuWindowLevel, NSWindowCollectionBehavior};
                 // NSWindowStyleMaskNonactivatingPanel — clicking the panel makes it
                 // key (so you can type) without activating the app.
                 const NONACTIVATING_PANEL: i32 = 1 << 7;
+                // NSMainMenuWindowLevel (== 24); float one level above it.
+                const MAIN_MENU_WINDOW_LEVEL: i32 = 24;
 
                 if let Some(win) = app.get_webview_window("main") {
                     if let Ok(panel) = win.to_panel() {
                         panel.set_style_mask(NONACTIVATING_PANEL);
-                        panel.set_level((NSMainMenuWindowLevel + 1) as i32);
+                        panel.set_level(MAIN_MENU_WINDOW_LEVEL + 1);
                         // Float above everything, follow across spaces, and stay put
                         // when another app goes fullscreen.
-                        panel.set_collection_behaviour(
-                            NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces
-                                | NSWindowCollectionBehavior::NSWindowCollectionBehaviorStationary
-                                | NSWindowCollectionBehavior::NSWindowCollectionBehaviorFullScreenAuxiliary,
-                        );
+                        //
+                        // tauri-nspanel's set_collection_behaviour takes cocoa's
+                        // NSWindowCollectionBehavior, a type cocoa has since deprecated
+                        // in favour of objc2-app-kit. The public API still demands the
+                        // cocoa type, so we can't migrate off it here — scope the
+                        // deprecation allow to just this forced call.
+                        #[allow(deprecated)]
+                        {
+                            use cocoa::appkit::NSWindowCollectionBehavior;
+                            panel.set_collection_behaviour(
+                                NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces
+                                    | NSWindowCollectionBehavior::NSWindowCollectionBehaviorStationary
+                                    | NSWindowCollectionBehavior::NSWindowCollectionBehaviorFullScreenAuxiliary,
+                            );
+                        }
                     }
                 }
             }
@@ -510,11 +695,11 @@ pub fn run() {
             // Place on the active monitor's corner and register the global hotkey.
             let handle = app.handle().clone();
             pin_to_corner(&handle, true);
-            let hotkey = {
-                let db = app.state::<Db>();
-                setting_or(&db, "hotkey", DEFAULT_HOTKEY)
-            };
-            let _ = register_hotkey(&handle, &hotkey);
+            let _ = register_hotkeys(&handle);
+
+            // ⌘↑/⌘↓ corner snapping must be caught natively — WKWebView eats them.
+            #[cfg(target_os = "macos")]
+            install_corner_key_monitor(&handle);
 
             Ok(())
         })
