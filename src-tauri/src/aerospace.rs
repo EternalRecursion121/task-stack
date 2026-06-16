@@ -11,11 +11,24 @@ pub struct AeroStatus {
 
 const DISABLED_MARKER: &str = "server is disabled";
 
+/// Resolve the `aerospace` executable.
+///
+/// A bundled macOS app (and dev servers launched from a GUI like Cursor) inherit
+/// only the minimal launchd PATH — `/usr/bin:/bin:/usr/sbin:/sbin` — which omits
+/// Homebrew, where `aerospace` lives. So we prefer the known Homebrew locations
+/// and only fall back to a bare `aerospace` (PATH lookup) when neither exists.
+fn aerospace_bin() -> &'static str {
+    const CANDIDATES: [&str; 2] = ["/opt/homebrew/bin/aerospace", "/usr/local/bin/aerospace"];
+    CANDIDATES
+        .into_iter()
+        .find(|p| std::path::Path::new(p).exists())
+        .unwrap_or("aerospace")
+}
+
 /// Run an `aerospace` subcommand. Returns Ok(stdout) on success, Err(message) otherwise.
 /// A disabled server is reported as a distinct, friendly error.
 fn run(args: &[&str]) -> Result<String, String> {
-    let output = Command::new("aerospace").args(args).output();
-    match output {
+    match Command::new(aerospace_bin()).args(args).output() {
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout).to_string();
             let stderr = String::from_utf8_lossy(&out.stderr).to_string();
@@ -72,6 +85,10 @@ pub fn list_workspaces() -> Result<Vec<String>, String> {
 pub fn focused_workspace() -> Result<String, String> {
     let out = run(&["list-workspaces", "--focused"])?;
     Ok(out.trim().to_string())
+}
+
+pub fn enable() -> Result<(), String> {
+    run(&["enable", "on"]).map(|_| ())
 }
 
 pub fn focus_workspace(name: &str, summon: bool) -> Result<(), String> {
