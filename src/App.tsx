@@ -10,7 +10,7 @@ import {
 import { SortableContext, arrayMove, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { listen } from "@tauri-apps/api/event";
 import { api } from "./api";
-import type { AeroStatus, JumpType, Settings as SettingsT, Task, WaitingKind } from "./types";
+import type { AeroStatus, JumpType, Settings as SettingsT, Task } from "./types";
 import TaskRow from "./components/TaskRow";
 import Settings from "./components/Settings";
 
@@ -20,6 +20,8 @@ const MAX_HEIGHT = 680;
 const DEFAULT_SETTINGS: SettingsT = {
   corner: "top-right",
   hotkey: "CmdOrCtrl+Space",
+  capture_hotkey: "CmdOrCtrl+Shift+Space",
+  capture_ws_hotkey: "CmdOrCtrl+Alt+Space",
   jump_mode: "workspace",
   auto_collapse: false,
 };
@@ -37,6 +39,8 @@ export default function App() {
   const [view, setView] = useState<"list" | "settings">("list");
   const [draft, setDraft] = useState("");
   const [bindNext, setBindNext] = useState(false);
+  // Task just created by the capture hotkey — it opens straight into rename mode.
+  const [captureId, setCaptureId] = useState<string | null>(null);
 
   const measureRef = useRef<HTMLDivElement>(null);
 
@@ -47,6 +51,8 @@ export default function App() {
       setSettings({
         corner: b.corner,
         hotkey: b.hotkey,
+        capture_hotkey: b.capture_hotkey,
+        capture_ws_hotkey: b.capture_ws_hotkey,
         jump_mode: b.jump_mode,
         auto_collapse: b.auto_collapse,
       });
@@ -56,8 +62,44 @@ export default function App() {
       setCollapsed(false);
       setView("settings");
     });
+    // Native ⌘↑/⌘↓ corner snapping reports the new corner back to keep us in sync.
+    const unCorner = listen<string>("corner-changed", (e) => {
+      setSettings((s) => ({ ...s, corner: e.payload }));
+    });
+    // Capture hotkeys: bind the current workspace to a fresh task, opened straight
+    // into rename mode. Payload `focusedOnly` picks the single focused workspace vs
+    // the full multi-monitor scene (mirrors ◎ vs ⌥-◎).
+    const unCapture = listen<boolean>("capture-workspace", async (e) => {
+      const focusedOnly = e.payload;
+      setCollapsed(false);
+      setView("list");
+      try {
+        let jumpType: JumpType | null;
+        let jumpValue: string | null;
+        let title: string;
+        if (focusedOnly) {
+          const ws = await api.aerospaceFocusedWorkspace();
+          jumpType = ws ? "workspace" : null;
+          jumpValue = ws || null;
+          title = ws || "New task";
+        } else {
+          const scene = await api.aerospaceVisibleScene();
+          const hasScene = scene.length > 0;
+          jumpType = hasScene ? "scene" : null;
+          jumpValue = hasScene ? JSON.stringify(scene) : null;
+          title = hasScene ? scene.join(" · ") : "New task";
+        }
+        const t = await api.createTask(title, null, jumpType, jumpValue);
+        setTasks((prev) => [t, ...prev]);
+        setCaptureId(t.id);
+      } catch (err) {
+        console.error("capture failed:", err);
+      }
+    });
     return () => {
       un.then((f) => f());
+      unCorner.then((f) => f());
+      unCapture.then((f) => f());
     };
   }, []);
 
@@ -99,12 +141,11 @@ export default function App() {
       if (!e.metaKey || e.shiftKey || e.altKey || e.ctrlKey) return;
       const tag = (e.target as HTMLElement | null)?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA") return;
-      const [v, h] = settings.corner.split("-");
+      const [v] = settings.corner.split("-");
       let next = settings.corner;
       if (e.key === "ArrowLeft") next = `${v}-left`;
       else if (e.key === "ArrowRight") next = `${v}-right`;
-      else if (e.key === "ArrowUp") next = `top-${h}`;
-      else if (e.key === "ArrowDown") next = `bottom-${h}`;
+      // ⌘↑/⌘↓ are handled natively (WKWebView swallows them here) — see lib.rs.
       else return;
       e.preventDefault();
       if (next !== settings.corner) {
@@ -118,10 +159,6 @@ export default function App() {
 
   // ---- groups ----
   const active = tasks.filter((t) => t.state === "active");
-  const waitingMe = tasks.filter((t) => t.state === "waiting" && t.waiting_kind !== "machine");
-  const waitingMachine = tasks.filter(
-    (t) => t.state === "waiting" && t.waiting_kind === "machine",
-  );
   const done = tasks.filter((t) => t.state === "done");
 
   // ---- actions ----
@@ -149,26 +186,32 @@ export default function App() {
     setDraft("");
   }, [draft, bindNext]);
 
-  const cycle = (t: Task) => {
-    let state: Task["state"] = "active";
-    let kind: WaitingKind | null = null;
-    if (t.state === "active") {
-      state = "waiting";
-      kind = "me";
-    } else if (t.state === "waiting" && t.waiting_kind !== "machine") {
-      state = "waiting";
-      kind = "machine";
-    }
-    api.setState(t.id, state, kind).then(replace);
+  // Persist a new order for a group of tasks, reflecting it locally first.
+  const applyOrder = (reordered: Task[]) => {
+    const order = new Map(reordered.map((t, i) => [t.id, i]));
+    setTasks((prev) =>
+      [...prev].sort((x, y) => {
+        const ix = order.get(x.id);
+        const iy = order.get(y.id);
+        if (ix !== undefined && iy !== undefined) return ix - iy;
+        return 0;
+      }),
+    );
+    api.reorder(reordered.map((t) => t.id)).catch(() => {});
   };
 
-  const complete = (t: Task) => api.setState(t.id, "done", null).then(replace);
-  const reopen = (t: Task) => api.setState(t.id, "active", null).then(replace);
+  // Defer: drop the task to the bottom of the active queue so what you can act
+  // on rises to the top. "Waiting" is just position now, not a state.
+  const defer = (t: Task) => applyOrder([...active.filter((x) => x.id !== t.id), t]);
+
+  const complete = (t: Task) => api.setState(t.id, "done").then(replace);
+  const reopen = (t: Task) => api.setState(t.id, "active").then(replace);
   const del = (t: Task) => api.deleteTask(t.id).then(() => remove(t.id));
   const rename = (t: Task, title: string) =>
     api.updateTitle(t.id, title, t.project).then(replace);
   const jump = (t: Task) => {
-    if (t.jump_type && t.jump_value) api.jump(t.jump_type, t.jump_value).catch(() => {});
+    if (t.jump_type && t.jump_value)
+      api.jump(t.jump_type, t.jump_value).catch((e) => console.error("jump failed:", e));
   };
   const bind = async (t: Task, focusedOnly = false) => {
     try {
@@ -184,8 +227,8 @@ export default function App() {
         const updated = await api.setJump(t.id, "scene", JSON.stringify(scene));
         replace(updated);
       }
-    } catch {
-      /* ignore when aerospace unavailable */
+    } catch (e) {
+      console.error("bind failed:", e);
     }
   };
 
@@ -198,27 +241,12 @@ export default function App() {
   const onDragEnd = (e: DragEndEvent) => {
     const { active: a, over } = e;
     if (!over || a.id === over.id) return;
-    const groups = [active, waitingMe, waitingMachine, done];
-    const group = groups.find((g) => g.some((t) => t.id === a.id));
+    const group = [active, done].find((g) => g.some((t) => t.id === a.id));
     if (!group || !group.some((t) => t.id === over.id)) return;
     const oldIndex = group.findIndex((t) => t.id === a.id);
     const newIndex = group.findIndex((t) => t.id === over.id);
-    const reordered = arrayMove(group, oldIndex, newIndex);
-    const ids = reordered.map((t) => t.id);
-    // optimistic: reflect new order locally
-    setTasks((prev) => {
-      const byId = new Map(reordered.map((t, i) => [t.id, i]));
-      return [...prev].sort((x, y) => {
-        const ix = byId.get(x.id);
-        const iy = byId.get(y.id);
-        if (ix !== undefined && iy !== undefined) return ix - iy;
-        return 0;
-      });
-    });
-    api.reorder(ids).catch(() => {});
+    applyOrder(arrayMove(group, oldIndex, newIndex));
   };
-
-  const waitingCount = waitingMe.length;
 
   return (
     <div
@@ -237,14 +265,6 @@ export default function App() {
         </button>
         <div className={`flex items-center gap-2 text-[12px] ${collapsed ? "" : "min-w-0 flex-1"}`}>
           <Count color="bg-emerald-400" n={active.length} label="active" />
-          {waitingCount > 0 ? (
-            <span className="flex items-center gap-1 whitespace-nowrap text-amber-300">
-              <span className="h-1.5 w-1.5 rounded-full bg-amber-400 ts-pulse" />
-              {waitingCount} waiting on you
-            </span>
-          ) : (
-            <Count color="bg-sky-400" n={waitingMachine.length} label="running" />
-          )}
         </div>
         {!collapsed && view === "list" && (
           <button
@@ -293,12 +313,6 @@ export default function App() {
             <Group title="Active" tasks={active} hideEmpty>
               {active.map((t) => row(t))}
             </Group>
-            <Group title="Waiting on you" accent="amber" tasks={waitingMe} hideEmpty>
-              {waitingMe.map((t) => row(t))}
-            </Group>
-            <Group title="Running" accent="sky" tasks={waitingMachine} hideEmpty>
-              {waitingMachine.map((t) => row(t))}
-            </Group>
             {done.length > 0 && (
               <div className="mt-1">
                 <button
@@ -330,8 +344,9 @@ export default function App() {
       <TaskRow
         key={t.id}
         task={t}
+        autoEdit={t.id === captureId}
         onJump={jump}
-        onCycle={cycle}
+        onDefer={defer}
         onComplete={complete}
         onReopen={reopen}
         onDelete={del}
@@ -351,33 +366,22 @@ function Count({ color, n, label }: { color: string; n: number; label: string })
   );
 }
 
-const ACCENT: Record<string, string> = {
-  amber: "text-amber-300/70",
-  sky: "text-sky-300/70",
-};
-
 function Group({
   title,
   tasks,
   children,
-  accent,
   hideEmpty,
 }: {
   title: string;
   tasks: Task[];
   children: React.ReactNode;
-  accent?: string;
   hideEmpty?: boolean;
 }) {
   if (hideEmpty && tasks.length === 0) return null;
   return (
     <div className="mb-1">
       {title && (
-        <div
-          className={`px-2 pb-0.5 pt-1 text-[10px] font-medium uppercase tracking-wide ${
-            accent ? ACCENT[accent] : "text-white/35"
-          }`}
-        >
+        <div className="px-2 pb-0.5 pt-1 text-[10px] font-medium uppercase tracking-wide text-white/35">
           {title}
         </div>
       )}

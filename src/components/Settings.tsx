@@ -20,6 +20,8 @@ const CORNERS = [
 export default function Settings({ settings, aero, onPatch, onAeroRefresh, onClose }: Props) {
   const [autostart, setAutostart] = useState(false);
   const [hotkey, setHotkey] = useState(settings.hotkey);
+  const [captureHotkey, setCaptureHotkey] = useState(settings.capture_hotkey);
+  const [captureWsHotkey, setCaptureWsHotkey] = useState(settings.capture_ws_hotkey);
 
   useEffect(() => {
     api.getAutostart().then(setAutostart).catch(() => {});
@@ -69,6 +71,36 @@ export default function Settings({ settings, aero, onPatch, onAeroRefresh, onClo
           }}
           spellCheck={false}
           className="w-40 rounded bg-white/[0.06] px-2 py-1 text-right text-[12px] outline-none focus:bg-white/10"
+        />
+      </Field>
+
+      <Field label="Capture scene (all monitors)">
+        <input
+          value={captureHotkey}
+          onChange={(e) => setCaptureHotkey(e.target.value)}
+          onBlur={() => {
+            const v = captureHotkey.trim();
+            api.setCaptureHotkey(v);
+            onPatch({ capture_hotkey: v });
+          }}
+          spellCheck={false}
+          placeholder="off"
+          className="w-40 rounded bg-white/[0.06] px-2 py-1 text-right text-[12px] outline-none focus:bg-white/10 placeholder:text-white/30"
+        />
+      </Field>
+
+      <Field label="Capture workspace (focused)">
+        <input
+          value={captureWsHotkey}
+          onChange={(e) => setCaptureWsHotkey(e.target.value)}
+          onBlur={() => {
+            const v = captureWsHotkey.trim();
+            api.setCaptureWsHotkey(v);
+            onPatch({ capture_ws_hotkey: v });
+          }}
+          spellCheck={false}
+          placeholder="off"
+          className="w-40 rounded bg-white/[0.06] px-2 py-1 text-right text-[12px] outline-none focus:bg-white/10 placeholder:text-white/30"
         />
       </Field>
 
